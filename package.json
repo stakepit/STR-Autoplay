@@ -1,0 +1,18 @@
+{
+  "name": "torrentio-wrapper-addon",
+  "version": "1.0.0",
+  "description": "A Stremio addon that wraps Torrentio to provide custom filtering and auto-selection.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "dependencies": {
+    "stremio-addon-sdk": "^1.2.0",
+    "axios": "^1.6.8",
+    "lru-cache": "^10.2.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.3"
+  }
+}
