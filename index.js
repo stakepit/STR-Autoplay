@@ -2,70 +2,68 @@ const { addonBuilder, serveHTTP } = require("stremio-addon-sdk");
 const { LRUCache } = require("lru-cache");
 const axios = require("axios");
 
-const DEFAULT_RESOLUTION = "720p"; // <- ai zis că vrei 720p prioritar
-const CACHE_TTL = 60 * 60 * 1000;
 const TORRENTIO_BASE_URL = "https://torrentio.strem.fun";
+const CACHE_TTL = 60 * 60 * 1000; // 1 hour
+const DEFAULT_RESOLUTION = "720p";
 
-const cache = new LRUCache({
-  max: 500,
-  ttl: CACHE_TTL,
-});
+const cache = new LRUCache({ max: 500, ttl: CACHE_TTL });
 
-function getResolution(text) {
-  if (!text) return "Unknown";
+// ----------------- Helpers -----------------
+
+function getResolution(text = "") {
   if (/(2160p|4k)/i.test(text)) return "2160p";
   if (/1080p/i.test(text)) return "1080p";
   if (/720p/i.test(text)) return "720p";
   return "Unknown";
 }
 
-function getSeeders(text) {
-  if (!text) return 0;
-  // Torrentio folosește de multe ori "👤 123" (cu spațiu) sau "👤123"
+function getSeeders(text = "") {
   const m = text.match(/👤\s*(\d+)/);
   return m ? parseInt(m[1], 10) : 0;
 }
 
-// dacă nu există size în title, doar estimăm grosier după rezoluție
-function getEstimatedSize(text) {
-  if (!text) return 1 * 1024 * 1024 * 1024;
-  if (/2160p|4k/i.test(text)) return 15 * 1024 * 1024 * 1024;
-  if (/1080p/i.test(text)) return 4 * 1024 * 1024 * 1024;
-  if (/720p/i.test(text)) return 1.5 * 1024 * 1024 * 1024;
-  return 1 * 1024 * 1024 * 1024;
+function getEstimatedSize(text = "") {
+  if (/2160p|4k/i.test(text)) return 15 * 1024 ** 3;
+  if (/1080p/i.test(text)) return 4 * 1024 ** 3;
+  if (/720p/i.test(text)) return 1.5 * 1024 ** 3;
+  return 1 * 1024 ** 3;
 }
 
 function selectBestStream(streams, config) {
-  const preferredResolution = config.preferredResolution || DEFAULT_RESOLUTION;
+  const preferred = config.preferredResolution || DEFAULT_RESOLUTION;
   const order = ["2160p", "1080p", "720p", "Unknown"];
 
-  const enriched = streams.map((s) => {
-    const text = s.title || s.name || "";
-    return {
-      ...s,
-      _text: text,
-      _resolution: getResolution(text),
-      _seeders: getSeeders(text),
-      _size: getEstimatedSize(text),
-    };
-  });
+  const enriched = streams
+    .filter(s => s.url || s.infoHash)
+    .map(s => {
+      const text = s.title || s.name || "";
+      return {
+        ...s,
+        _resolution: getResolution(text),
+        _seeders: getSeeders(text),
+        _size: getEstimatedSize(text),
+      };
+    });
 
-  // alege “cea mai bună rezoluție disponibilă” conform preferinței
+  if (!enriched.length) return null;
+
   let candidates = enriched;
 
-  if (preferredResolution !== "Any") {
-    const startIdx = Math.max(order.indexOf(preferredResolution), 0);
-    const bestAvail = order.slice(startIdx).find((r) =>
-      candidates.some((x) => x._resolution === r)
+  if (preferred !== "Any") {
+    const start = Math.max(order.indexOf(preferred), 0);
+    const bestRes = order.slice(start).find(r =>
+      candidates.some(s => s._resolution === r)
     );
-    if (bestAvail) candidates = candidates.filter((x) => x._resolution === bestAvail);
+    if (bestRes) {
+      candidates = candidates.filter(s => s._resolution === bestRes);
+    }
   }
 
-  // sort by seeders desc
   candidates.sort((a, b) => b._seeders - a._seeders);
-
   return candidates[0] || null;
 }
+
+// ----------------- Manifest -----------------
 
 const manifest = {
   id: "org.alexsdev.smartautoplay",
@@ -76,7 +74,6 @@ const manifest = {
   resources: ["stream"],
   types: ["movie", "series"],
   idPrefixes: ["tt"],
-  catalogs: [],
   configurable: true,
   config: [
     {
@@ -90,53 +87,53 @@ const manifest = {
   ],
 };
 
+// ----------------- Addon -----------------
+
 const addon = new addonBuilder(manifest);
 
 addon.defineStreamHandler(async ({ type, id, config }) => {
   const cacheKey = JSON.stringify({ type, id, config });
-
   if (cache.has(cacheKey)) {
     return { streams: cache.get(cacheKey) };
   }
 
-  const torrentioUrl = `${TORRENTIO_BASE_URL}/stream/${type}/${id}.json`;
-
   let torrentioStreams = [];
   try {
-    const r = await axios.get(torrentioUrl, { timeout: 15000 });
+    const r = await axios.get(
+      `${TORRENTIO_BASE_URL}/stream/${type}/${id}.json`,
+      { timeout: 15000 }
+    );
     torrentioStreams = r.data?.streams || [];
   } catch (e) {
-    console.error("Torrentio fetch error:", e.message);
-    cache.set(cacheKey, []);
-    return { streams: [] };
-  }
-
-  if (!torrentioStreams.length) {
-    cache.set(cacheKey, []);
+    console.error("Torrentio error:", e.message);
     return { streams: [] };
   }
 
   const best = selectBestStream(torrentioStreams, config);
-
   if (!best) {
     cache.set(cacheKey, []);
     return { streams: [] };
   }
 
-  // Return ONLY ONE stream => apare o singură opțiune în Sources
-  const one = {
+  // 🔥 THE FIX: return ONLY ONE STREAM
+  const singleStream = {
     ...best,
     name: "SmarT-Autoplay",
     title: `[BEST PICK] ${best.title || best.name || ""}`,
     behaviorHints: {
       ...(best.behaviorHints || {}),
-      immediatePlay: true, // nu garantează, dar poate ajuta în unele clienți
+      immediatePlay: true,
+      bingeGroup: id, // helps next-episode flow
     },
   };
 
-  const result = [one];
+  const result = [singleStream];
   cache.set(cacheKey, result);
   return { streams: result };
 });
 
-serveHTTP(addon.getInterface(), { port: process.env.PORT || 7000 });
+// ----------------- Server -----------------
+
+serveHTTP(addon.getInterface(), {
+  port: process.env.PORT || 7000,
+});
