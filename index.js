@@ -2,18 +2,26 @@ const { addonBuilder, serveHTTP } = require("stremio-addon-sdk");
 const { LRUCache } = require("lru-cache");
 const axios = require("axios");
 
-// -------------------- CONSTANTE --------------------
+// ====== CONFIG DEFAULTS ======
+const DEFAULTS = {
+  preferredResolution: "720p", // 720p before 1080p
+  minSeeders720: 30,
+  maxSizeMB720: 800,
+  minSeeders1080: 50,
+  maxSizeMB1080: 1500,
+};
+
 const TORRENTIO_BASE_URL = "https://torrentio.strem.fun";
 const CACHE_TTL = 60 * 60 * 1000;
 
-// -------------------- CACHE --------------------
+// ====== CACHE ======
 const cache = new LRUCache({
   max: 500,
   ttl: CACHE_TTL,
   allowStale: false,
 });
 
-// -------------------- HELPERS --------------------
+// ====== HELPERS ======
 function getResolution(text = "") {
   const t = text.toLowerCase();
   if (t.includes("2160p") || t.includes("4k")) return "2160p";
@@ -23,13 +31,13 @@ function getResolution(text = "") {
 }
 
 function getSeeders(text = "") {
-  // Torrentio pune seeders de obicei în title cu emoji
+  // Torrentio often has "👤123" in the title/name
   const m = text.match(/👤\s*(\d+)/);
   return m ? parseInt(m[1], 10) : 0;
 }
 
 function parseSizeMB(text = "") {
-  // Uneori apare în title: "1.4 GB" / "850 MB"
+  // Many streams include size like "1.4 GB" or "700 MB" in title
   const m = text.match(/(\d+(?:\.\d+)?)\s*(GB|MB)\b/i);
   if (!m) return null;
   const num = parseFloat(m[1]);
@@ -38,142 +46,125 @@ function parseSizeMB(text = "") {
   return unit === "GB" ? num * 1024 : num;
 }
 
-function normalizeConfig(config = {}) {
-  // Stremio trimite config ca string-uri uneori
-  const out = {};
-
-  out.preferredResolution = config.preferredResolution || "720p";
-
-  out.minSeeders720 = Number(config.minSeeders720 ?? 30);
-  out.maxSizeMB720 = Number(config.maxSizeMB720 ?? 800);
-
-  out.minSeeders1080 = Number(config.minSeeders1080 ?? 50);
-  out.maxSizeMB1080 = Number(config.maxSizeMB1080 ?? 1500);
-
-  out.onlyOne = (config.onlyOne ?? "true") === "true";
-  return out;
+function normalizeConfig(cfg = {}) {
+  return {
+    preferredResolution: cfg.preferredResolution || DEFAULTS.preferredResolution,
+    minSeeders720: Number(cfg.minSeeders720 ?? DEFAULTS.minSeeders720),
+    maxSizeMB720: Number(cfg.maxSizeMB720 ?? DEFAULTS.maxSizeMB720),
+    minSeeders1080: Number(cfg.minSeeders1080 ?? DEFAULTS.minSeeders1080),
+    maxSizeMB1080: Number(cfg.maxSizeMB1080 ?? DEFAULTS.maxSizeMB1080),
+  };
 }
 
 function pickBestStream(streams, cfg) {
-  // IMPORTANT: Torrentio are info în `title` mai mult decât în `name`
+  const c = normalizeConfig(cfg);
+
   const enriched = streams.map((s) => {
-    const title = String(s.title || "");
+    const title = String(s.title || s.name || "");
     return {
-      s,
+      raw: s,
       title,
-      resolution: getResolution(title),
+      res: getResolution(title),
       seeders: getSeeders(title),
-      sizeMB: parseSizeMB(title), // poate fi null dacă nu există
+      sizeMB: parseSizeMB(title), // may be null
     };
   });
 
-  // reguli: prefer 720p cu seeders/min și size/max, apoi 1080p, apoi fallback
-  const ok720 = enriched
-    .filter((x) => x.resolution === "720p")
-    .filter((x) => x.seeders >= cfg.minSeeders720)
-    .filter((x) => x.sizeMB == null || x.sizeMB <= cfg.maxSizeMB720);
+  // helper: accept size only if known OR unknown (unknown = allowed but ranked lower)
+  const okSize = (x, maxMB) => x.sizeMB == null ? true : x.sizeMB <= maxMB;
 
-  const ok1080 = enriched
-    .filter((x) => x.resolution === "1080p")
-    .filter((x) => x.seeders >= cfg.minSeeders1080)
-    .filter((x) => x.sizeMB == null || x.sizeMB <= cfg.maxSizeMB1080);
+  // 1) strict 720p rule
+  const candidates720 = enriched
+    .filter(x =>
+      x.res === "720p" &&
+      x.seeders >= c.minSeeders720 &&
+      okSize(x, c.maxSizeMB720)
+    )
+    .sort((a, b) => (b.seeders - a.seeders) || ((a.sizeMB ?? 1e9) - (b.sizeMB ?? 1e9)));
 
-  const sortBySeeders = (arr) =>
-    arr.sort((a, b) => (b.seeders || 0) - (a.seeders || 0));
+  if (candidates720.length) return candidates720[0].raw;
 
-  // Preferred resolution first if possible
-  if (cfg.preferredResolution === "720p") {
-    if (ok720.length) return sortBySeeders(ok720)[0].s;
-    if (ok1080.length) return sortBySeeders(ok1080)[0].s;
-  } else if (cfg.preferredResolution === "1080p") {
-    if (ok1080.length) return sortBySeeders(ok1080)[0].s;
-    if (ok720.length) return sortBySeeders(ok720)[0].s;
-  } else if (cfg.preferredResolution === "2160p") {
-    // dacă vrei să păstrezi și 2160p, îl poți adăuga similar
-    // momentan facem fallback la cele două principale
-    if (ok1080.length) return sortBySeeders(ok1080)[0].s;
-    if (ok720.length) return sortBySeeders(ok720)[0].s;
-  } else {
-    // Any
-    if (ok720.length) return sortBySeeders(ok720)[0].s;
-    if (ok1080.length) return sortBySeeders(ok1080)[0].s;
+  // 2) strict 1080p rule
+  const candidates1080 = enriched
+    .filter(x =>
+      x.res === "1080p" &&
+      x.seeders >= c.minSeeders1080 &&
+      okSize(x, c.maxSizeMB1080)
+    )
+    .sort((a, b) => (b.seeders - a.seeders) || ((a.sizeMB ?? 1e9) - (b.sizeMB ?? 1e9)));
+
+  if (candidates1080.length) return candidates1080[0].raw;
+
+  // 3) fallback: best by resolution preference then seeders
+  const order = c.preferredResolution === "1080p"
+    ? ["1080p", "720p", "2160p", "Unknown"]
+    : ["720p", "1080p", "2160p", "Unknown"];
+
+  for (const r of order) {
+    const group = enriched.filter(x => x.res === r).sort((a, b) => b.seeders - a.seeders);
+    if (group.length) return group[0].raw;
   }
 
-  // fallback: ia primul cu cei mai mulți seeders din toate
-  return sortBySeeders(enriched)[0]?.s || null;
+  return streams[0] || null;
 }
 
-// -------------------- MANIFEST (CU ROTIȚA) --------------------
+// ====== MANIFEST ======
 const manifest = {
   id: "org.alexsdev.smartautoplay",
-  version: "1.2.3", // IMPORTANT: crește versiunea când schimbi manifestul
+  version: "1.2.4",
   name: "SmarT-Autoplay",
   description: "Finds best source for movies and TV shows",
   logo: "https://raw.githubusercontent.com/stakepit/smart-torrentio-picker/main/logo.png",
-
   resources: ["stream"],
   types: ["movie", "series"],
   idPrefixes: ["tt"],
   catalogs: [],
-
-  // ✅ pentru compatibilitate
-  configurable: true,
-
-  // ✅ asta face să apară rotița în Stremio
   behaviorHints: {
-    configurable: true,
+    configurable: true,          // <-- this makes the gear appear (clients that support it)
+    configurationRequired: false
   },
-
-  // ✅ Stremio generează UI de configurare din asta
-  config: [
-    {
-      key: "preferredResolution",
-      type: "select",
-      title: "Preferred Resolution",
-      options: ["720p", "1080p", "Any"],
-      default: "720p",
-      required: true,
-    },
-    {
-      key: "minSeeders720",
-      type: "number",
-      title: "Min seeders for 720p",
-      default: 30,
-      required: true,
-    },
-    {
-      key: "maxSizeMB720",
-      type: "number",
-      title: "Max size (MB) for 720p",
-      default: 800,
-      required: true,
-    },
-    {
-      key: "minSeeders1080",
-      type: "number",
-      title: "Min seeders for 1080p",
-      default: 50,
-      required: true,
-    },
-    {
-      key: "maxSizeMB1080",
-      type: "number",
-      title: "Max size (MB) for 1080p",
-      default: 1500,
-      required: true,
-    },
-    {
-      key: "onlyOne",
-      type: "select",
-      title: "Show only one stream",
-      options: ["true", "false"],
-      default: "true",
-      required: true,
-    },
-  ],
 };
 
-// -------------------- ADDON --------------------
+// Stremio config page fields (opens /configure on your domain)
+manifest.config = [
+  {
+    key: "preferredResolution",
+    type: "select",
+    title: "Preferred resolution",
+    options: ["720p", "1080p"],
+    default: DEFAULTS.preferredResolution,
+    required: true,
+  },
+  {
+    key: "minSeeders720",
+    type: "number",
+    title: "Min seeders for 720p",
+    default: DEFAULTS.minSeeders720,
+    required: true,
+  },
+  {
+    key: "maxSizeMB720",
+    type: "number",
+    title: "Max size (MB) for 720p",
+    default: DEFAULTS.maxSizeMB720,
+    required: true,
+  },
+  {
+    key: "minSeeders1080",
+    type: "number",
+    title: "Min seeders for 1080p",
+    default: DEFAULTS.minSeeders1080,
+    required: true,
+  },
+  {
+    key: "maxSizeMB1080",
+    type: "number",
+    title: "Max size (MB) for 1080p",
+    default: DEFAULTS.maxSizeMB1080,
+    required: true,
+  },
+];
+
 const addon = new addonBuilder(manifest);
 
 addon.defineStreamHandler(async ({ type, id, config }) => {
@@ -184,44 +175,33 @@ addon.defineStreamHandler(async ({ type, id, config }) => {
     return { streams: cache.get(cacheKey) };
   }
 
-  // call torrentio
-  const url = `${TORRENTIO_BASE_URL}/stream/${type}/${id}.json`;
-
-  let torrentioStreams = [];
   try {
-    const r = await axios.get(url, { timeout: 15000 });
-    torrentioStreams = r.data?.streams || [];
-  } catch (e) {
-    console.error("Torrentio error:", e.message);
-    cache.set(cacheKey, []);
-    return { streams: [] };
+    const url = `${TORRENTIO_BASE_URL}/stream/${type}/${id}.json`;
+    const resp = await axios.get(url, { timeout: 15000 });
+    const streams = resp.data?.streams || [];
+
+    if (!streams.length) {
+      cache.set(cacheKey, []);
+      return { streams: [] };
+    }
+
+    const best = pickBestStream(streams, cfg);
+    if (!best) {
+      cache.set(cacheKey, []);
+      return { streams: [] };
+    }
+
+    // IMPORTANT: return ONLY ONE stream => single option in Sources
+    // behaviorHints are optional; bingeGroup helps episodes
+    const one = [{
+  ...best,
+  name: "SmarT-Autoplay",
+  title: best.title || best.name || "Best pick",
+  behaviorHints: {
+    ...(best.behaviorHints || {}),
+    immediatePlay: true,     // 🔥 AUTOPLAY HINT
+    bingeGroup: `${id}`,     // ajută pentru episoade
   }
+  }];
 
-  if (!torrentioStreams.length) {
-    cache.set(cacheKey, []);
-    return { streams: [] };
-  }
-
-  const best = pickBestStream(torrentioStreams, cfg);
-  if (!best) {
-    cache.set(cacheKey, []);
-    return { streams: [] };
-  }
-
-  // Returnează 1 singur stream (sau lista completă dacă vrei)
-  const streams = cfg.onlyOne
-    ? [
-        {
-          ...best,
-          name: "SmarT-Autoplay",
-          title: `✅ Best Pick • ${best.title || ""}`,
-        },
-      ]
-    : torrentioStreams;
-
-  cache.set(cacheKey, streams);
-  return { streams };
-});
-
-// -------------------- SERVER --------------------
 serveHTTP(addon.getInterface(), { port: process.env.PORT || 7000 });
