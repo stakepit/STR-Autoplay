@@ -106,7 +106,7 @@ function pickBestStream(streams, cfg) {
 // -------------------- MANIFEST (CU ROTIȚA) --------------------
 const manifest = {
   id: "org.alexsdev.smartautoplay",
-  version: "1.2.2", // IMPORTANT: crește versiunea când schimbi manifestul
+  version: "1.2.3", // IMPORTANT: crește versiunea când schimbi manifestul
   name: "SmarT-Autoplay",
   description: "Finds best source for movies and TV shows",
   logo: "https://raw.githubusercontent.com/stakepit/smart-torrentio-picker/main/logo.png",
