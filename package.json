@@ -1,6 +1,6 @@
 {
   "name": "smart-autoplay",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "SmarT-Autoplay – Finds best source for movies and TV shows",
   "main": "index.js",
   "type": "commonjs",
