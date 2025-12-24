@@ -8,6 +8,36 @@ const axios = require("axios");
 const TORRENTIO_BASE_URL = "https://torrentio.strem.fun";
 const CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
+  // IMPORTANT: asta face sa apara rotița Configure
+  configurable: true,
+  config: [
+    {
+      key: "preferredResolution",
+      type: "select",
+      title: "Preferred resolution",
+      options: ["Any", "720p", "1080p", "2160p"],
+      default: "720p",
+      required: true
+    },
+    {
+      key: "maxSizeMB",
+      type: "number",
+      title: "Max file size (MB)",
+      default: 800,
+      required: true
+    },
+    {
+      key: "minSeeders",
+      type: "number",
+      title: "Min seeders",
+      default: 30,
+      required: true
+    }
+  ]
+};
+
+const addon = new addonBuilder(manifest);
+
 // Defaults (used if user doesn't configure)
 const DEFAULTS = {
   preferredResolution: "720p", // your preference
@@ -149,7 +179,7 @@ function pickBest(streams, cfg) {
 // =======================
 const manifest = {
   id: "org.alexsdev.smartautoplay",
-  version: "1.2.0",
+  version: "1.2.1",
   name: "SmarT-Autoplay",
   description: "Finds best source for movies and TV shows",
   logo: "https://raw.githubusercontent.com/stakepit/smart-torrentio-picker/main/logo.png",
