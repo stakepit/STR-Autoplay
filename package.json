@@ -2,10 +2,10 @@
   "name": "smart-autoplay",
   "version": "1.2.2",
   "description": "SmarT-Autoplay – Finds best source for movies and TV shows",
-  "main": "server.js",
+  "main": "index.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node server.js"
+    "start": "node index.js"
   },
   "dependencies": {
     "stremio-addon-sdk": "^1.6.10",
