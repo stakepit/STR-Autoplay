@@ -1,18 +1,15 @@
 {
-  "name": "torrentio-wrapper-addon",
-  "version": "1.0.0",
-  "description": "A Stremio addon that wraps Torrentio to provide custom filtering and auto-selection.",
-  "main": "src/index.js",
+  "name": "smart-autoplay",
+  "version": "1.2.2",
+  "description": "SmarT-Autoplay – Finds best source for movies and TV shows",
+  "main": "server.js",
+  "type": "commonjs",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "start": "node server.js"
   },
   "dependencies": {
-    "stremio-addon-sdk": "^1.2.0",
+    "stremio-addon-sdk": "^1.6.10",
     "axios": "^1.6.8",
     "lru-cache": "^10.2.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.3"
   }
 }
