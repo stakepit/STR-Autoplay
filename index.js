@@ -12,22 +12,22 @@ const cache = new LRUCache({
 });
 
 // -------------------- HELPERS --------------------
+
 function getResolution(text = "") {
   const t = String(text).toLowerCase();
   if (t.includes("2160p") || t.includes("4k")) return "2160p";
   if (t.includes("1080p")) return "1080p";
   if (t.includes("720p")) return "720p";
+  if (t.includes("480p")) return "480p";
   return "Unknown";
 }
 
 function getSeeders(text = "") {
-  // Torrentio de obicei pune: "👤123"
   const m = String(text).match(/👤\s*(\d+)/);
   return m ? parseInt(m[1], 10) : 0;
 }
 
 function parseSizeMB(text = "") {
-  // Unele stream-uri au în title/desc: "💾 1.4 GB" / "700 MB"
   const m = String(text).match(/(\d+(?:\.\d+)?)\s*(GB|MB)\b/i);
   if (!m) return null;
   const num = parseFloat(m[1]);
@@ -36,79 +36,128 @@ function parseSizeMB(text = "") {
   return unit === "GB" ? num * 1024 : num;
 }
 
+function getDebridStatus(title = "") {
+  // Common Torrentio Debrid tags
+  // [RD+] RealDebrid cached
+  // [AD+] AllDebrid cached
+  // [PM+] Premiumize cached
+  // [D+] DebridLink cached
+  const t = title.toUpperCase();
+  if (t.includes("[RD+]") || t.includes("[AD+]") || t.includes("[PM+]") || t.includes("[D+]")) {
+    return true;
+  }
+  return false;
+}
+
+function isCamOrLowQuality(title = "") {
+  const t = title.toUpperCase();
+  // CAM, TS (Telesync), SCR (Screener), TC (Telecine)
+  // We use regex to avoid partial matches like "SCR" in "DESCRIPTION" (unlikely but safe)
+  if (/\b(CAM|HDCAM|TS|HDTS|TELESYNC|SCR|SCREENER|DVDPROMO|TC|HDTC)\b/.test(t)) {
+    return true;
+  }
+  return false;
+}
+
 function pickBestStream(streams, cfg) {
-  const preferredResolution = cfg.preferredResolution || "720p";
+  const preferredResolution = cfg.preferredResolution || "1080p";
+  const priorizeDebrid = cfg.prioritizeDebrid !== "false"; // Default true
+  const excludeCam = cfg.excludeCam !== "false"; // Default true
 
-  const minSeeders720 = Number(cfg.minSeeders720 ?? 30);
-  const maxSizeMB720 = Number(cfg.maxSizeMB720 ?? 800);
+  // P2P Specific Config
+  const p2pMinSeeders = parseInt(cfg.p2pMinSeeders || "20", 10);
+  const p2pMaxFileSizeGB = parseFloat(cfg.p2pMaxFileSizeGB || "3");
 
-  const minSeeders1080 = Number(cfg.minSeeders1080 ?? 50);
-  const maxSizeMB1080 = Number(cfg.maxSizeMB1080 ?? 1500);
-
-  const enriched = (streams || []).map((s) => {
+  // Pre-process all streams
+  let candidates = (streams || []).map((s) => {
     const title = `${s.name || ""} ${s.title || ""} ${s.description || ""}`;
     return {
       raw: s,
       title,
       res: getResolution(title),
       seeders: getSeeders(title),
-      sizeMB: parseSizeMB(title), // can be null
+      sizeMB: parseSizeMB(title),
+      isCached: getDebridStatus(title),
+      isCam: isCamOrLowQuality(title),
     };
   });
 
-  // Preferință: 720p OK -> 1080p OK -> fallback pe rezoluția preferată -> orice
-  const ok720 = enriched.filter((x) => {
-    if (x.res !== "720p") return false;
-    if (x.seeders < minSeeders720) return false;
-    // dacă nu avem size, nu-l descalificăm; îl punem mai jos ca scor
-    if (x.sizeMB != null && x.sizeMB > maxSizeMB720) return false;
+  // 1. Garbage Filter
+  if (excludeCam) {
+    candidates = candidates.filter(x => !x.isCam);
+  }
+
+  // 2. Strict P2P Filters (Only apply if NOT cached)
+  // If a stream is NOT cached (Debrid), it must meet P2P standards to be considered "Auto-Playable"
+  candidates = candidates.filter(x => {
+    if (x.isCached) return true; // Cached = Always OK
+
+    // Filters for P2P
+    if (x.seeders < p2pMinSeeders) return false; // Too few peers
+    if (x.sizeMB && (x.sizeMB / 1024) > p2pMaxFileSizeGB) return false; // Too big for P2P streaming
+
     return true;
   });
 
-  const ok1080 = enriched.filter((x) => {
-    if (x.res !== "1080p") return false;
-    if (x.seeders < minSeeders1080) return false;
-    if (x.sizeMB != null && x.sizeMB > maxSizeMB1080) return false;
-    return true;
+  // 3. Score candidates
+  candidates.forEach(c => {
+    let score = 0;
+
+    // --- TIER 1: RELIABILITY ---
+    if (priorizeDebrid && c.isCached) {
+      score += 10000;
+    } else {
+      // P2P Scoring
+      // Seeders are king. 100 seeders = 100 points.
+      score += Math.min(c.seeders, 500);
+
+      // Penalty for unknown size (risky)
+      if (!c.sizeMB) score -= 50;
+
+      // Bonus for efficient size (High seeds + Low Size = Fast)
+      if (c.sizeMB) {
+        // Density: Seeders per GB. 
+        // 100 seeds / 1GB = 100. 100 seeds / 10GB = 10.
+        const density = c.seeders / (c.sizeMB / 1024);
+        score += Math.min(density, 100);
+      }
+    }
+
+    // --- TIER 2: RESOLUTION ---
+    if (c.res === preferredResolution) {
+      score += 2000;
+    } else {
+      if (preferredResolution === "1080p") {
+        if (c.res === "2160p") score += 1500;
+        if (c.res === "720p") score += 1000;
+      } else if (preferredResolution === "720p") {
+        if (c.res === "1080p") score += 1500;
+        if (c.res === "480p") score += 500;
+      } else if (preferredResolution === "2160p") {
+        if (c.res === "1080p") score += 1000;
+      }
+    }
+
+    // --- TIER 3: QUALITY EXTRAS ---
+    if (c.title.includes("HDR") || c.title.includes("Dolby Vision") || c.title.includes("DV")) {
+      score += 100;
+    }
+
+    c.score = score;
   });
 
-  function score(x) {
-    // seeders mult = bine
-    // size mai mic (dacă există) = puțin mai bine
-    const seedScore = x.seeders;
-    const sizePenalty = x.sizeMB == null ? 0 : Math.min(200, x.sizeMB / 10);
-    // preferăm să avem size cunoscut (mic bonus)
-    const knownSizeBonus = x.sizeMB == null ? 0 : 10;
-    return seedScore + knownSizeBonus - sizePenalty;
-  }
+  // 4. Sort
+  candidates.sort((a, b) => b.score - a.score);
 
-  function bestOf(arr) {
-    return arr.sort((a, b) => score(b) - score(a))[0] || null;
-  }
-
-  let chosen = null;
-
-  if (preferredResolution === "720p") {
-    chosen = bestOf(ok720) || bestOf(ok1080);
-  } else if (preferredResolution === "1080p") {
-    chosen = bestOf(ok1080) || bestOf(ok720);
-  } else if (preferredResolution === "2160p") {
-    const ok2160 = enriched.filter((x) => x.res === "2160p");
-    chosen = bestOf(ok2160) || bestOf(ok1080) || bestOf(ok720);
-  } else {
-    // Any
-    chosen = bestOf(ok720) || bestOf(ok1080) || bestOf(enriched);
-  }
-
-  return chosen ? chosen.raw : null;
+  return candidates[0] ? candidates[0].raw : null;
 }
 
-// -------------------- MANIFEST (CONFIG IN STREMIO UI) --------------------
+// -------------------- MANIFEST --------------------
 const manifest = {
   id: "org.alexsdev.smartautoplay",
-  version: "1.2.4",
+  version: "1.3.2",
   name: "SmarT-Autoplay",
-  description: "Finds best source for movies and TV shows",
+  description: "Seamlessly auto-selects the best stream (Optimized for both Debrid & P2P)",
   logo: "https://raw.githubusercontent.com/stakepit/smart-torrentio-picker/main/logo.png",
   resources: ["stream"],
   types: ["movie", "series"],
@@ -119,21 +168,45 @@ const manifest = {
     configurable: true,
   },
 
-  // Asta e meniul din Stremio (gear)
   config: [
     {
       key: "preferredResolution",
       type: "select",
       title: "Preferred resolution",
       options: ["720p", "1080p", "2160p", "Any"],
-      default: "720p",
+      default: "1080p",
       required: true,
     },
-    { key: "minSeeders720", type: "number", title: "Min seeders (720p)", default: 30, required: true },
-    { key: "maxSizeMB720", type: "number", title: "Max size MB (720p)", default: 800, required: true },
-
-    { key: "minSeeders1080", type: "number", title: "Min seeders (1080p)", default: 50, required: true },
-    { key: "maxSizeMB1080", type: "number", title: "Max size MB (1080p)", default: 1500, required: true },
+    {
+      key: "prioritizeDebrid",
+      type: "select",
+      title: "Prioritize Cached (Debrid)",
+      options: ["true", "false"],
+      default: "true",
+      required: true,
+    },
+    {
+      key: "excludeCam",
+      type: "select",
+      title: "Exclude CAM/Screener",
+      options: ["true", "false"],
+      default: "true",
+      required: true,
+    },
+    {
+      key: "p2pMinSeeders",
+      type: "number",
+      title: "P2P Only: Min Seeders",
+      default: 20,
+      required: false,
+    },
+    {
+      key: "p2pMaxFileSizeGB",
+      type: "number",
+      title: "P2P Only: Max File Size (GB)",
+      default: 3,
+      required: false,
+    },
   ],
 };
 
@@ -159,31 +232,60 @@ addon.defineStreamHandler(async ({ type, id, config }) => {
   }
 
   if (!torrentioStreams.length) {
+    // If no streams, we just return empty
     cache.set(cacheKey, []);
     return { streams: [] };
   }
 
   const best = pickBestStream(torrentioStreams, config || {});
+
+  // FAILSAFE:
+  // If we found a "best", we put it FIRST with immediatePlay.
+  // BUT we also append the rest of the streams below it, 
+  // so if the autoplay fails, the user isn't stuck with nothing.
+  // Actually, Stremio behavior with 'immediatePlay' might ignore the rest if the first one works?
+  // User requested "Seamless". Usually that means "Just work".
+  // Returning ONLY one stream is risky if that link is dead.
+  // Compromise: Return [Best (Auto), ...Others].
+  // However, `immediatePlay: true` usually triggers the player immediately.
+  // If the user backs out, they see the list.
+
   if (!best) {
-    cache.set(cacheKey, []);
-    return { streams: [] };
+    // No candidate passed filter? Return original list (fallback)
+    // or return empty?
+    // Better to return original list without autoplay trigger if we filtered everything out (unlikely)
+    return { streams: torrentioStreams };
   }
 
-  // IMPORTANT:
-  // 1) Returnăm UN SINGUR stream => doar o opțiune în Sources
-  // 2) immediatePlay e doar “hint”. Unele clients NU autoplay 100%.
-  const one = [{
-    ...best,
-    name: `SmarT-Autoplay • ${best.name || best.title || ""}`,
-    behaviorHints: {
-      ...(best.behaviorHints || {}),
-      immediatePlay: true,
-    }
-  }];
+  const behaviorHints = {
+    ...(best.behaviorHints || {}),
+    immediatePlay: true,
+  };
 
-  cache.set(cacheKey, one);
-  return { streams: one };
+  if (type === "series") {
+    behaviorHints.bingeGroup = "smart-autoplay-series";
+  }
+
+  const autoStream = {
+    ...best,
+    name: `⚡ AutoPlay • ${best.name || best.title || ""}`,
+    behaviorHints,
+  };
+
+  // We place the Best stream first, then the rest of the original streams (excluding the chosen one to avoid dupe)
+  // This serves as the "Fail-Safe".
+  const others = torrentioStreams.filter(s => s !== best);
+  const result = [autoStream, ...others];
+
+  cache.set(cacheKey, result);
+  return { streams: result };
 });
 
 // -------------------- SERVER --------------------
-serveHTTP(addon.getInterface(), { port: process.env.PORT || 7000 });
+if (require.main === module) {
+  serveHTTP(addon.getInterface(), { port: process.env.PORT || 7000 });
+}
+
+
+
+
