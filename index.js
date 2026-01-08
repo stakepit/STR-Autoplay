@@ -65,8 +65,9 @@ function pickBestStream(streams, cfg) {
   const excludeCam = cfg.excludeCam !== "false"; // Default true
 
   // P2P Specific Config
-  const p2pMinSeeders = parseInt(cfg.p2pMinSeeders || "20", 10);
-  const p2pMaxFileSizeGB = parseFloat(cfg.p2pMaxFileSizeGB || "3");
+  // Default to 0 seeders (safer) to prevent total block if regex fails, user can increase in UI
+  const p2pMinSeeders = parseInt(cfg.p2pMinSeeders || "0", 10);
+  const p2pMaxFileSizeGB = parseFloat(cfg.p2pMaxFileSizeGB || "5"); // Increased default to 5GB
 
   // Pre-process all streams
   let candidates = (streams || []).map((s) => {
@@ -197,14 +198,14 @@ const manifest = {
       key: "p2pMinSeeders",
       type: "number",
       title: "P2P Only: Min Seeders",
-      default: 20,
+      default: 0,
       required: false,
     },
     {
       key: "p2pMaxFileSizeGB",
       type: "number",
       title: "P2P Only: Max File Size (GB)",
-      default: 3,
+      default: 5,
       required: false,
     },
   ],
